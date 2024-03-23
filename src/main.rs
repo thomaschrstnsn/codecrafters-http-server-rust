@@ -4,8 +4,83 @@ use std::{
     net::{TcpListener, TcpStream},
 };
 
-fn resp(mut stream: &TcpStream, code: u16, status: &str) -> std::io::Result<()> {
-    write!(&mut stream, "HTTP/1.1 {} {}\r\n\r\n", code, status)
+struct Content<'a> {
+    mime_type: &'a str,
+    content: &'a [u8],
+}
+
+struct StatusCode {
+    code: u16,
+    status: &'static str,
+}
+
+mod status_codes {
+    use super::StatusCode;
+
+    pub const OK: StatusCode = StatusCode {
+        code: 200,
+        status: "OK",
+    };
+
+    pub const NOT_FOUND: StatusCode = StatusCode {
+        code: 404,
+        status: "Not Found",
+    };
+}
+
+struct Response<'a> {
+    status_code: &'a StatusCode,
+    content: Option<Content<'a>>,
+}
+
+fn write_newline(mut stream: &TcpStream) -> std::io::Result<()> {
+    stream.write(b"\r\n")?;
+    Ok(())
+}
+
+fn write_header(mut stream: &TcpStream, key: &str, value: &str) -> std::io::Result<()> {
+    write!(&mut stream, "{}: {}", key, value)?;
+    write_newline(&mut stream)
+}
+
+impl<'a> Response<'a> {
+    fn write_to_stream(&self, mut stream: &TcpStream) -> std::io::Result<()> {
+        write!(
+            &mut stream,
+            "HTTP/1.1 {} {}",
+            self.status_code.code, self.status_code.status
+        )?;
+        write_newline(&mut stream)?;
+
+        if let Some(content) = &self.content {
+            write_header(&mut stream, "Content-Type", content.mime_type)?;
+            write_newline(&mut stream)?;
+            write_header(&mut stream, "Content-Length", &format!("{}", content.content.len()))?;
+            write_newline(&mut stream)?;
+
+            stream.write(content.content)?;
+            write_newline(&mut stream)?;
+        }
+
+        Ok(())
+    }
+
+    fn empty_response(status_code: &'a StatusCode) -> Self {
+        Self {
+            status_code,
+            content: None,
+        }
+    }
+
+    fn text_reponse(status_code: &'a StatusCode, text: &'a str) -> Self {
+        Self {
+            status_code,
+            content: Some(Content {
+                mime_type: "text/plain",
+                content: text.as_bytes(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -71,10 +146,20 @@ fn read_request(stream: &TcpStream) -> Vec<String> {
 }
 
 fn handle_request(request: &Request, mut stream: &TcpStream) -> std::io::Result<()> {
-    if request.path == "/" {
-        resp(&mut stream, 200, "OK")
+    if let Some(path) = request.path.strip_prefix('/') {
+        if path.is_empty() {
+            return Response::empty_response(&status_codes::OK).write_to_stream(&mut stream);
+        }
+        match path.split_once('/') {
+            Some(("echo", content)) => {
+                Response::text_reponse(&status_codes::OK, content).write_to_stream(&mut stream)
+            }
+            _ => {
+                Response::empty_response(&status_codes::NOT_FOUND).write_to_stream(&mut stream)
+            }
+        }
     } else {
-        resp(&mut stream, 404, "Not Found")
+        Response::empty_response(&status_codes::NOT_FOUND).write_to_stream(&mut stream)
     }
 }
 
@@ -91,16 +176,6 @@ fn main() {
                 let request_lines = read_request(&stream);
                 let request = parse_request(&request_lines).expect("request can be parsed");
                 handle_request(&request, &mut stream).expect("request can be handled");
-
-                // match parse_request(&buffer) {
-                //     Ok(req) => match handle_request(&req, &mut stream) {
-                //         Ok(_) => println!("request handled"),
-                //         Err(_) => println!("problem handling request!"),
-                //     },
-                //     Err(err) => println!("problem understanding request: {:#?}", err),
-                // }
-                //
-                // let _ = resp(&mut stream, 200, "OK");
             }
             Err(e) => {
                 println!("error: {}", e);
