@@ -54,7 +54,6 @@ impl<'a> Response<'a> {
 
         if let Some(content) = &self.content {
             write_header(&mut stream, "Content-Type", content.mime_type)?;
-            write_newline(&mut stream)?;
             write_header(
                 &mut stream,
                 "Content-Length",
@@ -63,10 +62,11 @@ impl<'a> Response<'a> {
             write_newline(&mut stream)?;
 
             stream.write(content.content)?;
+        } else {
+            write_newline(&mut stream)?;
+            write_newline(&mut stream)?;
         }
 
-        write_newline(&mut stream)?;
-        write_newline(&mut stream)?;
 
         Ok(())
     }
