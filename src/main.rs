@@ -55,12 +55,18 @@ impl<'a> Response<'a> {
         if let Some(content) = &self.content {
             write_header(&mut stream, "Content-Type", content.mime_type)?;
             write_newline(&mut stream)?;
-            write_header(&mut stream, "Content-Length", &format!("{}", content.content.len()))?;
+            write_header(
+                &mut stream,
+                "Content-Length",
+                &format!("{}", content.content.len()),
+            )?;
             write_newline(&mut stream)?;
 
             stream.write(content.content)?;
-            write_newline(&mut stream)?;
         }
+
+        write_newline(&mut stream)?;
+        write_newline(&mut stream)?;
 
         Ok(())
     }
@@ -154,9 +160,7 @@ fn handle_request(request: &Request, mut stream: &TcpStream) -> std::io::Result<
             Some(("echo", content)) => {
                 Response::text_reponse(&status_codes::OK, content).write_to_stream(&mut stream)
             }
-            _ => {
-                Response::empty_response(&status_codes::NOT_FOUND).write_to_stream(&mut stream)
-            }
+            _ => Response::empty_response(&status_codes::NOT_FOUND).write_to_stream(&mut stream),
         }
     } else {
         Response::empty_response(&status_codes::NOT_FOUND).write_to_stream(&mut stream)
