@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::{
     io::{self, Write},
@@ -99,6 +100,7 @@ struct Request {
     verb: Verb,
     path: String,
     version: String,
+    headers: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -132,10 +134,18 @@ fn parse_request(request_lines: &Vec<String>) -> Result<Request, RequestParseErr
             _ => Err(RequestParseError::InvalidVerb),
         }?;
 
+        let mut headers : HashMap<String, String> = HashMap::new();
+        for header_line in request_lines.iter().skip(1) {
+            if let Some((key, value)) = header_line.split_once(": ") {
+                headers.insert(key.to_owned(), value.to_owned());
+            }
+        }
+
         Ok(Request {
             verb,
             path: path_str,
             version: vers_str,
+            headers,
         })
     }
 }
@@ -152,9 +162,13 @@ fn read_request(stream: &TcpStream) -> Vec<String> {
 }
 
 fn handle_request(request: &Request, mut stream: &TcpStream) -> std::io::Result<()> {
+    dbg!("handling: {:?}", request);
     if let Some(path) = request.path.strip_prefix('/') {
         if path.is_empty() {
             return Response::empty_response(&status_codes::OK).write_to_stream(&mut stream);
+        }
+        if path == "user-agent" {
+            return Response::text_reponse(&status_codes::OK, request.headers.get("User-Agent").expect("must have User-Agent header")).write_to_stream(&mut stream);
         }
         match path.split_once('/') {
             Some(("echo", content)) => {
