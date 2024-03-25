@@ -161,23 +161,23 @@ fn read_request(stream: &TcpStream) -> Vec<String> {
     request_lines
 }
 
-fn handle_request(request: &Request, mut stream: &TcpStream) -> std::io::Result<()> {
+fn handle_request(request: &Request) -> Response {
     dbg!("handling: {:?}", request);
     if let Some(path) = request.path.strip_prefix('/') {
         if path.is_empty() {
-            return Response::empty_response(&status_codes::OK).write_to_stream(&mut stream);
+            return Response::empty_response(&status_codes::OK);
         }
         if path == "user-agent" {
-            return Response::text_reponse(&status_codes::OK, request.headers.get("User-Agent").expect("must have User-Agent header")).write_to_stream(&mut stream);
+            return Response::text_reponse(&status_codes::OK, request.headers.get("User-Agent").expect("must have User-Agent header"));
         }
         match path.split_once('/') {
             Some(("echo", content)) => {
-                Response::text_reponse(&status_codes::OK, content).write_to_stream(&mut stream)
+                Response::text_reponse(&status_codes::OK, content)
             }
-            _ => Response::empty_response(&status_codes::NOT_FOUND).write_to_stream(&mut stream),
+            _ => Response::empty_response(&status_codes::NOT_FOUND),
         }
     } else {
-        Response::empty_response(&status_codes::NOT_FOUND).write_to_stream(&mut stream)
+        Response::empty_response(&status_codes::NOT_FOUND)
     }
 }
 
@@ -193,7 +193,8 @@ fn main() {
 
                 let request_lines = read_request(&stream);
                 let request = parse_request(&request_lines).expect("request can be parsed");
-                handle_request(&request, &mut stream).expect("request can be handled");
+                let response = handle_request(&request);
+                response.write_to_stream(&mut stream).expect("response can be sent back");
             }
             Err(e) => {
                 println!("error: {}", e);
