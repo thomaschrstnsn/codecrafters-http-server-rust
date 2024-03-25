@@ -37,13 +37,12 @@ struct Response<'a> {
 }
 
 fn write_newline(mut stream: &TcpStream) -> std::io::Result<()> {
-    stream.write(b"\r\n")?;
-    Ok(())
+    stream.write_all(b"\r\n")
 }
 
 fn write_header(mut stream: &TcpStream, key: &str, value: &str) -> std::io::Result<()> {
     write!(&mut stream, "{}: {}", key, value)?;
-    write_newline(&mut stream)
+    write_newline(stream)
 }
 
 impl<'a> Response<'a> {
@@ -53,21 +52,21 @@ impl<'a> Response<'a> {
             "HTTP/1.1 {} {}",
             self.status_code.code, self.status_code.status
         )?;
-        write_newline(&mut stream)?;
+        write_newline(stream)?;
 
         if let Some(content) = &self.content {
-            write_header(&mut stream, "Content-Type", content.mime_type)?;
+            write_header(stream, "Content-Type", content.mime_type)?;
             write_header(
-                &mut stream,
+                stream,
                 "Content-Length",
                 &format!("{}", content.content.len()),
             )?;
-            write_newline(&mut stream)?;
+            write_newline(stream)?;
 
-            stream.write(&content.content)?;
+            stream.write_all(&content.content)?;
         } else {
-            write_newline(&mut stream)?;
-            write_newline(&mut stream)?;
+            write_newline(stream)?;
+            write_newline(stream)?;
         }
 
         Ok(())
@@ -106,7 +105,7 @@ impl<'a> Response<'a> {
 
 #[derive(Debug)]
 enum Verb {
-    GET,
+    Get,
 }
 
 #[derive(Debug)]
@@ -124,8 +123,8 @@ enum RequestParseError {
     InvalidStructure,
 }
 
-fn parse_request(request_lines: &Vec<String>) -> Result<Request, RequestParseError> {
-    if request_lines.len() == 0 {
+fn parse_request(request_lines: &[String]) -> Result<Request, RequestParseError> {
+    if request_lines.is_empty() {
         Err(RequestParseError::NoInput)
     } else {
         let start_line = &request_lines[0];
@@ -144,7 +143,7 @@ fn parse_request(request_lines: &Vec<String>) -> Result<Request, RequestParseErr
             .to_owned();
 
         let verb = match verb_str {
-            "GET" => Ok(Verb::GET),
+            "GET" => Ok(Verb::Get),
             _ => Err(RequestParseError::InvalidVerb),
         }?;
 
@@ -175,7 +174,7 @@ fn read_request(stream: &TcpStream) -> Vec<String> {
     request_lines
 }
 
-fn handle_request<'a>(request: &'a Request) -> Response<'a> {
+fn handle_request(request: &Request) -> Response {
     dbg!("handling: {:?}", request);
     if let Some(path) = request.path.strip_prefix('/') {
         match path {
@@ -191,7 +190,8 @@ fn handle_request<'a>(request: &'a Request) -> Response<'a> {
                 Some(("echo", content)) => Response::text_reponse(&status_codes::OK, content),
                 Some(("files", filename)) => Response::file_response(
                     &[
-                        CONFIGURATION.files_root
+                        CONFIGURATION
+                            .files_root
                             .as_ref()
                             .expect("files_root should be configured"),
                         &filename.to_owned(),
@@ -207,14 +207,14 @@ fn handle_request<'a>(request: &'a Request) -> Response<'a> {
     }
 }
 
-fn handle_connection(mut stream: &TcpStream) -> () {
+fn handle_connection(stream: &TcpStream) {
     println!("accepted new connection");
 
-    let request_lines = read_request(&stream);
+    let request_lines = read_request(stream);
     let request = parse_request(&request_lines).expect("request can be parsed");
     let response = handle_request(&request);
     response
-        .write_to_stream(&mut stream)
+        .write_to_stream(stream)
         .expect("response can be sent back");
 }
 
@@ -255,8 +255,8 @@ fn main() {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(mut stream) => {
-                let _ = thread::spawn(move || handle_connection(&mut stream));
+            Ok(stream) => {
+                let _ = thread::spawn(move || handle_connection(&stream));
             }
             Err(e) => {
                 println!("error: {}", e);
