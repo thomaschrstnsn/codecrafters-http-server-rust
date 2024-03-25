@@ -97,10 +97,9 @@ impl<'a> Response<'a> {
                 content: Some(Content {
                     mime_type: "application/octet-stream",
                     content: file_content,
-                })
+                }),
             },
             Err(_) => Self::empty_response(&status_codes::NOT_FOUND),
-
         }
     }
 }
@@ -176,7 +175,7 @@ fn read_request(stream: &TcpStream) -> Vec<String> {
     request_lines
 }
 
-fn handle_request<'a>(conf: &Configuration, request: &'a Request) -> Response<'a> {
+fn handle_request<'a>(request: &'a Request) -> Response<'a> {
     dbg!("handling: {:?}", request);
     if let Some(path) = request.path.strip_prefix('/') {
         match path {
@@ -190,7 +189,16 @@ fn handle_request<'a>(conf: &Configuration, request: &'a Request) -> Response<'a
             ),
             _ => match path.split_once('/') {
                 Some(("echo", content)) => Response::text_reponse(&status_codes::OK, content),
-                Some(("files", filename)) => Response::file_response(&[conf.files_root.as_ref().expect("files_root should be configured"), &filename.to_owned()].iter().collect()),
+                Some(("files", filename)) => Response::file_response(
+                    &[
+                        CONFIGURATION.files_root
+                            .as_ref()
+                            .expect("files_root should be configured"),
+                        &filename.to_owned(),
+                    ]
+                    .iter()
+                    .collect(),
+                ),
                 _ => Response::empty_response(&status_codes::NOT_FOUND),
             },
         }
@@ -199,17 +207,16 @@ fn handle_request<'a>(conf: &Configuration, request: &'a Request) -> Response<'a
     }
 }
 
-fn handle_connection(conf: &Configuration, mut stream: &TcpStream) -> () {
+fn handle_connection(mut stream: &TcpStream) -> () {
     println!("accepted new connection");
 
     let request_lines = read_request(&stream);
     let request = parse_request(&request_lines).expect("request can be parsed");
-    let response = handle_request(&conf, &request);
+    let response = handle_request(&request);
     response
         .write_to_stream(&mut stream)
         .expect("response can be sent back");
 }
-
 
 #[derive(Clone)]
 struct Configuration {
@@ -235,18 +242,21 @@ impl Configuration {
     }
 }
 
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref CONFIGURATION: Configuration = Configuration::from_args(&mut std::env::args());
+}
+
 fn main() {
     println!("Logs from your program will appear here!");
 
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
-    let configuration = Configuration::from_args(&mut std::env::args());
-
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let configuration = configuration.clone();
-                let _ = thread::spawn(move || handle_connection(&configuration, &mut stream));
+                let _ = thread::spawn(move || handle_connection(&mut stream));
             }
             Err(e) => {
                 println!("error: {}", e);
