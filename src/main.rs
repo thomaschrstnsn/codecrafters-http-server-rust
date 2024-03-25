@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::BufRead;
+use std::thread;
 use std::{
     io::{self, Write},
     net::{TcpListener, TcpStream},
@@ -68,7 +69,6 @@ impl<'a> Response<'a> {
             write_newline(&mut stream)?;
         }
 
-
         Ok(())
     }
 
@@ -134,7 +134,7 @@ fn parse_request(request_lines: &Vec<String>) -> Result<Request, RequestParseErr
             _ => Err(RequestParseError::InvalidVerb),
         }?;
 
-        let mut headers : HashMap<String, String> = HashMap::new();
+        let mut headers: HashMap<String, String> = HashMap::new();
         for header_line in request_lines.iter().skip(1) {
             if let Some((key, value)) = header_line.split_once(": ") {
                 headers.insert(key.to_owned(), value.to_owned());
@@ -168,17 +168,32 @@ fn handle_request(request: &Request) -> Response {
             return Response::empty_response(&status_codes::OK);
         }
         if path == "user-agent" {
-            return Response::text_reponse(&status_codes::OK, request.headers.get("User-Agent").expect("must have User-Agent header"));
+            return Response::text_reponse(
+                &status_codes::OK,
+                request
+                    .headers
+                    .get("User-Agent")
+                    .expect("must have User-Agent header"),
+            );
         }
         match path.split_once('/') {
-            Some(("echo", content)) => {
-                Response::text_reponse(&status_codes::OK, content)
-            }
+            Some(("echo", content)) => Response::text_reponse(&status_codes::OK, content),
             _ => Response::empty_response(&status_codes::NOT_FOUND),
         }
     } else {
         Response::empty_response(&status_codes::NOT_FOUND)
     }
+}
+
+fn handle_connection(mut stream: &TcpStream) -> () {
+    println!("accepted new connection");
+
+    let request_lines = read_request(&stream);
+    let request = parse_request(&request_lines).expect("request can be parsed");
+    let response = handle_request(&request);
+    response
+        .write_to_stream(&mut stream)
+        .expect("response can be sent back");
 }
 
 fn main() {
@@ -189,12 +204,7 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                println!("accepted new connection");
-
-                let request_lines = read_request(&stream);
-                let request = parse_request(&request_lines).expect("request can be parsed");
-                let response = handle_request(&request);
-                response.write_to_stream(&mut stream).expect("response can be sent back");
+                let _ = thread::spawn(move || handle_connection(&mut stream));
             }
             Err(e) => {
                 println!("error: {}", e);
