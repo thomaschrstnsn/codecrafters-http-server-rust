@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 use std::io::BufRead;
+use std::path::PathBuf;
 use std::thread;
 use std::{
     io::{self, Write},
     net::{TcpListener, TcpStream},
 };
 
-struct Content<'a> {
-    mime_type: &'a str,
-    content: &'a [u8],
+struct Content {
+    mime_type: &'static str,
+    content: Vec<u8>,
 }
 
 struct StatusCode {
@@ -32,7 +33,7 @@ mod status_codes {
 
 struct Response<'a> {
     status_code: &'a StatusCode,
-    content: Option<Content<'a>>,
+    content: Option<Content>,
 }
 
 fn write_newline(mut stream: &TcpStream) -> std::io::Result<()> {
@@ -63,7 +64,7 @@ impl<'a> Response<'a> {
             )?;
             write_newline(&mut stream)?;
 
-            stream.write(content.content)?;
+            stream.write(&content.content)?;
         } else {
             write_newline(&mut stream)?;
             write_newline(&mut stream)?;
@@ -84,8 +85,22 @@ impl<'a> Response<'a> {
             status_code,
             content: Some(Content {
                 mime_type: "text/plain",
-                content: text.as_bytes(),
+                content: text.as_bytes().to_vec(),
             }),
+        }
+    }
+
+    fn file_response(path: &PathBuf) -> Self {
+        match std::fs::read(path) {
+            Ok(file_content) => Self {
+                status_code: &status_codes::OK,
+                content: Some(Content {
+                    mime_type: "application/octet-stream",
+                    content: file_content,
+                })
+            },
+            Err(_) => Self::empty_response(&status_codes::NOT_FOUND),
+
         }
     }
 }
@@ -161,39 +176,63 @@ fn read_request(stream: &TcpStream) -> Vec<String> {
     request_lines
 }
 
-fn handle_request(request: &Request) -> Response {
+fn handle_request<'a>(conf: &Configuration, request: &'a Request) -> Response<'a> {
     dbg!("handling: {:?}", request);
     if let Some(path) = request.path.strip_prefix('/') {
-        if path.is_empty() {
-            return Response::empty_response(&status_codes::OK);
-        }
-        if path == "user-agent" {
-            return Response::text_reponse(
+        match path {
+            "" => Response::empty_response(&status_codes::OK),
+            "user-agent" => Response::text_reponse(
                 &status_codes::OK,
                 request
                     .headers
                     .get("User-Agent")
                     .expect("must have User-Agent header"),
-            );
-        }
-        match path.split_once('/') {
-            Some(("echo", content)) => Response::text_reponse(&status_codes::OK, content),
-            _ => Response::empty_response(&status_codes::NOT_FOUND),
+            ),
+            _ => match path.split_once('/') {
+                Some(("echo", content)) => Response::text_reponse(&status_codes::OK, content),
+                Some(("files", filename)) => Response::file_response(&[conf.files_root.as_ref().expect("files_root should be configured"), &filename.to_owned()].iter().collect()),
+                _ => Response::empty_response(&status_codes::NOT_FOUND),
+            },
         }
     } else {
         Response::empty_response(&status_codes::NOT_FOUND)
     }
 }
 
-fn handle_connection(mut stream: &TcpStream) -> () {
+fn handle_connection(conf: &Configuration, mut stream: &TcpStream) -> () {
     println!("accepted new connection");
 
     let request_lines = read_request(&stream);
     let request = parse_request(&request_lines).expect("request can be parsed");
-    let response = handle_request(&request);
+    let response = handle_request(&conf, &request);
     response
         .write_to_stream(&mut stream)
         .expect("response can be sent back");
+}
+
+
+#[derive(Clone)]
+struct Configuration {
+    files_root: Option<String>,
+}
+
+impl Configuration {
+    fn from_args(args: &mut std::env::Args) -> Configuration {
+        args.next(); // skip first (program)
+        let directory = if let Some(dir_arg) = args.next() {
+            if dir_arg == "--directory" {
+                args.next()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Configuration {
+            files_root: directory,
+        }
+    }
 }
 
 fn main() {
@@ -201,10 +240,13 @@ fn main() {
 
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
+    let configuration = Configuration::from_args(&mut std::env::args());
+
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let _ = thread::spawn(move || handle_connection(&mut stream));
+                let configuration = configuration.clone();
+                let _ = thread::spawn(move || handle_connection(&configuration, &mut stream));
             }
             Err(e) => {
                 println!("error: {}", e);
