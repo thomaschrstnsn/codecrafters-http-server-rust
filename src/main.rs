@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::io::{BufRead, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::thread;
 use std::{
-    io::{self, Write},
+    io::Write,
     net::{TcpListener, TcpStream},
 };
 
@@ -20,20 +20,16 @@ struct StatusCode {
 mod status_codes {
     use super::StatusCode;
 
-    pub const OK: StatusCode = StatusCode {
-        code: 200,
-        status: "OK",
-    };
+    const fn status_code(code: u16, status: &'static str) -> StatusCode {
+        StatusCode { code, status }
+    }
 
-    pub const NOT_FOUND: StatusCode = StatusCode {
-        code: 404,
-        status: "Not Found",
-    };
+    pub const OK: StatusCode = status_code(200, "OK");
+    pub const CREATED: StatusCode = status_code(201, "Created");
 
-    pub const CREATED: StatusCode = StatusCode {
-        code: 201,
-        status: "Created",
-    };
+    pub const NOT_FOUND: StatusCode = status_code(404, "Not Found");
+
+    pub const INTERNAL_SERVER_ERROR: StatusCode = status_code(500, "Internal Server Error");
 }
 
 struct Response<'a> {
@@ -125,82 +121,87 @@ struct Request {
 
 #[derive(Debug)]
 enum RequestParseError {
-    NoInput,
     InvalidVerb,
+    CouldNotReadStartLine,
     InvalidStructure,
+    CouldNotReadHeader,
+    InvalidHeader,
     InvalidContentLength,
     CouldNotReadBody,
 }
 
-fn parse_request(mut stream: &TcpStream) -> Result<Request, RequestParseError> {
-    let request_lines = read_request(stream);
-    if request_lines.is_empty() {
-        Err(RequestParseError::NoInput)
-    } else {
-        let start_line = &request_lines[0];
-        let mut split_iter = start_line.split(' ');
-
-        let verb_str = split_iter
-            .next()
-            .ok_or(RequestParseError::InvalidStructure)?;
-        let path_str = split_iter
-            .next()
-            .ok_or(RequestParseError::InvalidStructure)?
-            .to_owned();
-        let vers_str = split_iter
-            .next()
-            .ok_or(RequestParseError::InvalidStructure)?
-            .to_owned();
-
-        let verb = match verb_str {
-            "GET" => Ok(Verb::Get),
-            "POST" => Ok(Verb::Post),
-            _ => Err(RequestParseError::InvalidVerb),
-        }?;
-
-        let mut headers: HashMap<String, String> = HashMap::new();
-        for header_line in request_lines.iter().skip(1) {
-            if let Some((key, value)) = header_line.split_once(": ") {
-                headers.insert(key.to_owned(), value.to_owned());
-            }
+fn read_headers(reader: &mut dyn BufRead) -> Result<HashMap<String, String>, RequestParseError> {
+    let mut headers: HashMap<String, String> = HashMap::new();
+    loop {
+        let mut header_line = String::new();
+        reader
+            .read_line(&mut header_line)
+            .map_err(|_| RequestParseError::CouldNotReadHeader)?;
+        let header_line = header_line.trim_end();
+        if header_line.is_empty() {
+            break;
         }
 
-        let content = if let Some(length_str) = headers.get("Content-Length") {
-            let content_length = length_str
-                .parse::<usize>()
-                .map_err(|_| RequestParseError::InvalidContentLength)?;
-            let mut buffer: Vec<u8> = Vec::with_capacity(content_length);
-            buffer.resize(content_length, 0);
-            dbg!(content_length);
-            stream
-                .read_exact(&mut buffer)
-                .map_err(|_| RequestParseError::CouldNotReadBody)?;
-
-            Some(buffer)
+        if let Some((key, value)) = header_line.split_once(": ") {
+            headers.insert(key.to_owned(), value.to_owned());
         } else {
-            None
-        };
-
-        Ok(Request {
-            verb,
-            path: path_str,
-            version: vers_str,
-            headers,
-            body: content,
-        })
+            return Err(RequestParseError::InvalidHeader);
+        }
     }
+    Ok(headers)
 }
 
-fn read_request(stream: &TcpStream) -> Vec<String> {
-    let reader = io::BufReader::new(stream);
-    // TODO: reader.read_line
-    let request_lines: Vec<_> = reader
-        .lines()
-        .map(|result| result.expect("valid utf8"))
-        .take_while(|line| !line.is_empty())
-        .collect();
+fn parse_request(mut stream: &TcpStream) -> Result<Request, RequestParseError> {
+    let mut reader = BufReader::new(&mut stream);
 
-    request_lines
+    let mut start_line = String::new();
+    reader
+        .read_line(&mut start_line)
+        .map_err(|_| RequestParseError::CouldNotReadStartLine)?;
+    let mut split_iter = start_line.split(' ');
+
+    let verb_str = split_iter
+        .next()
+        .ok_or(RequestParseError::InvalidStructure)?;
+    let path_str = split_iter
+        .next()
+        .ok_or(RequestParseError::InvalidStructure)?
+        .to_owned();
+    let vers_str = split_iter
+        .next()
+        .ok_or(RequestParseError::InvalidStructure)?
+        .to_owned();
+
+    let verb = match verb_str {
+        "GET" => Ok(Verb::Get),
+        "POST" => Ok(Verb::Post),
+        _ => Err(RequestParseError::InvalidVerb),
+    }?;
+
+    let headers = read_headers(&mut reader)?;
+
+    let content = if let Some(length_str) = headers.get("Content-Length") {
+        let content_length = length_str
+            .parse::<usize>()
+            .map_err(|_| RequestParseError::InvalidContentLength)?;
+        let mut buffer: Vec<u8> = vec![0; content_length];
+
+        reader
+            .read_exact(&mut buffer)
+            .map_err(|_| RequestParseError::CouldNotReadBody)?;
+
+        Some(buffer)
+    } else {
+        None
+    };
+
+    Ok(Request {
+        verb,
+        path: path_str,
+        version: vers_str,
+        headers,
+        body: content,
+    })
 }
 
 fn handle_request(request: &Request) -> Response {
@@ -217,24 +218,34 @@ fn handle_request(request: &Request) -> Response {
             ),
             _ => match path.split_once('/') {
                 Some(("echo", content)) => Response::text_reponse(&status_codes::OK, content),
-                Some(("files", filename)) => match request.verb {
-                    Verb::Get => Response::file_response(
-                        &[
-                            CONFIGURATION
-                                .files_root
+                Some(("files", filename)) => {
+                    let path = [
+                        CONFIGURATION
+                            .files_root
+                            .as_ref()
+                            .expect("files_root should be configured"),
+                        &filename.to_owned(),
+                    ]
+                    .iter()
+                    .collect();
+
+                    match request.verb {
+                        Verb::Get => Response::file_response(&path),
+                        Verb::Post => {
+                            let body = request
+                                .body
                                 .as_ref()
-                                .expect("files_root should be configured"),
-                            &filename.to_owned(),
-                        ]
-                        .iter()
-                        .collect(),
-                    ),
-                    Verb::Post => {
-                        let length = request.body.as_ref().unwrap().len();
-                        dbg!(length);
-                        return Response::empty_response(&status_codes::CREATED);
+                                .expect("body should be present on request");
+
+                            match std::fs::write(path, body) {
+                                Ok(_) => Response::empty_response(&status_codes::CREATED),
+                                Err(_) => {
+                                    Response::empty_response(&status_codes::INTERNAL_SERVER_ERROR)
+                                }
+                            }
+                        }
                     }
-                },
+                }
                 _ => Response::empty_response(&status_codes::NOT_FOUND),
             },
         }
@@ -246,7 +257,7 @@ fn handle_request(request: &Request) -> Response {
 fn handle_connection(stream: &TcpStream) {
     println!("accepted new connection");
 
-    let request = parse_request(&stream).expect("request can be parsed");
+    let request = parse_request(stream).expect("request should be parsable");
     let response = handle_request(&request);
     response
         .write_to_stream(stream)
