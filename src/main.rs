@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::path::PathBuf;
 use std::thread;
 use std::{
@@ -28,6 +28,11 @@ mod status_codes {
     pub const NOT_FOUND: StatusCode = StatusCode {
         code: 404,
         status: "Not Found",
+    };
+
+    pub const CREATED: StatusCode = StatusCode {
+        code: 201,
+        status: "Created",
     };
 }
 
@@ -106,6 +111,7 @@ impl<'a> Response<'a> {
 #[derive(Debug)]
 enum Verb {
     Get,
+    Post,
 }
 
 #[derive(Debug)]
@@ -114,6 +120,7 @@ struct Request {
     path: String,
     version: String,
     headers: HashMap<String, String>,
+    body: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -121,9 +128,12 @@ enum RequestParseError {
     NoInput,
     InvalidVerb,
     InvalidStructure,
+    InvalidContentLength,
+    CouldNotReadBody,
 }
 
-fn parse_request(request_lines: &[String]) -> Result<Request, RequestParseError> {
+fn parse_request(mut stream: &TcpStream) -> Result<Request, RequestParseError> {
+    let request_lines = read_request(stream);
     if request_lines.is_empty() {
         Err(RequestParseError::NoInput)
     } else {
@@ -144,6 +154,7 @@ fn parse_request(request_lines: &[String]) -> Result<Request, RequestParseError>
 
         let verb = match verb_str {
             "GET" => Ok(Verb::Get),
+            "POST" => Ok(Verb::Post),
             _ => Err(RequestParseError::InvalidVerb),
         }?;
 
@@ -154,17 +165,35 @@ fn parse_request(request_lines: &[String]) -> Result<Request, RequestParseError>
             }
         }
 
+        let content = if let Some(length_str) = headers.get("Content-Length") {
+            let content_length = length_str
+                .parse::<usize>()
+                .map_err(|_| RequestParseError::InvalidContentLength)?;
+            let mut buffer: Vec<u8> = Vec::with_capacity(content_length);
+            buffer.resize(content_length, 0);
+            dbg!(content_length);
+            stream
+                .read_exact(&mut buffer)
+                .map_err(|_| RequestParseError::CouldNotReadBody)?;
+
+            Some(buffer)
+        } else {
+            None
+        };
+
         Ok(Request {
             verb,
             path: path_str,
             version: vers_str,
             headers,
+            body: content,
         })
     }
 }
 
 fn read_request(stream: &TcpStream) -> Vec<String> {
     let reader = io::BufReader::new(stream);
+    // TODO: reader.read_line
     let request_lines: Vec<_> = reader
         .lines()
         .map(|result| result.expect("valid utf8"))
@@ -188,17 +217,24 @@ fn handle_request(request: &Request) -> Response {
             ),
             _ => match path.split_once('/') {
                 Some(("echo", content)) => Response::text_reponse(&status_codes::OK, content),
-                Some(("files", filename)) => Response::file_response(
-                    &[
-                        CONFIGURATION
-                            .files_root
-                            .as_ref()
-                            .expect("files_root should be configured"),
-                        &filename.to_owned(),
-                    ]
-                    .iter()
-                    .collect(),
-                ),
+                Some(("files", filename)) => match request.verb {
+                    Verb::Get => Response::file_response(
+                        &[
+                            CONFIGURATION
+                                .files_root
+                                .as_ref()
+                                .expect("files_root should be configured"),
+                            &filename.to_owned(),
+                        ]
+                        .iter()
+                        .collect(),
+                    ),
+                    Verb::Post => {
+                        let length = request.body.as_ref().unwrap().len();
+                        dbg!(length);
+                        return Response::empty_response(&status_codes::CREATED);
+                    }
+                },
                 _ => Response::empty_response(&status_codes::NOT_FOUND),
             },
         }
@@ -210,8 +246,7 @@ fn handle_request(request: &Request) -> Response {
 fn handle_connection(stream: &TcpStream) {
     println!("accepted new connection");
 
-    let request_lines = read_request(stream);
-    let request = parse_request(&request_lines).expect("request can be parsed");
+    let request = parse_request(&stream).expect("request can be parsed");
     let response = handle_request(&request);
     response
         .write_to_stream(stream)
